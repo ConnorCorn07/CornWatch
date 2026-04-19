@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+
+    <AssemblyName>CornWatch</AssemblyName>
+    <RootNamespace>CornWatch</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Content Include="UI\Dashboard\dashboard.html">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- WebView2 for the HTML dashboard panel -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2365.46" />
+    <!-- WMI for hardware data (temps, drives) -->
+    <PackageReference Include="System.Management" Version="8.0.0" />
+    <!-- JSON serialization for data bridge -->
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+</Project>

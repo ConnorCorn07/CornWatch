@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CornWatch", "CornWatch\CornWatch.csproj", "{4F93B760-0267-B18B-B240-A172F458E129}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{4F93B760-0267-B18B-B240-A172F458E129}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4F93B760-0267-B18B-B240-A172F458E129}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4F93B760-0267-B18B-B240-A172F458E129}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4F93B760-0267-B18B-B240-A172F458E129}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {0EFD3F23-35D5-4188-84A5-B49D1CBA1CB0}
+	EndGlobalSection
+EndGlobal

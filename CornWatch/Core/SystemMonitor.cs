@@ -1,0 +1,219 @@
+using System.Diagnostics;
+using System.Management;
+using CornWatch.Models;
+
+namespace CornWatch.Core;
+
+/// <summary>
+/// Polls system metrics on a background timer.
+/// Raises SnapshotReady with fresh data every tick.
+/// </summary>
+public sealed class SystemMonitor : IDisposable
+{
+    // ── Events ────────────────────────────────────────────────────────────────
+    public event Action<SystemSnapshot>? SnapshotReady;
+
+    // ── Config ────────────────────────────────────────────────────────────────
+    public int PollIntervalMs { get; set; } = 1000; // 1-second default
+
+    // ── Internal state ────────────────────────────────────────────────────────
+    private readonly System.Threading.Timer _timer;
+    private readonly PerformanceCounter _cpuTotal;
+    private readonly List<PerformanceCounter> _cpuCores = [];
+    private readonly PerformanceCounter _diskRead;
+    private readonly PerformanceCounter _diskWrite;
+    private readonly PerformanceCounter _netSent;
+    private readonly PerformanceCounter _netRecv;
+    private bool _disposed;
+
+    public SystemMonitor()
+    {
+        _cpuTotal = new PerformanceCounter("Processor", "% Processor Time", "_Total");
+
+        // Per-core counters
+        var category = new PerformanceCounterCategory("Processor");
+        foreach (var instance in category.GetInstanceNames()
+            .Where(n => n != "_Total")
+            .OrderBy(n => n))
+        {
+            _cpuCores.Add(new PerformanceCounter("Processor", "% Processor Time", instance));
+        }
+
+        _diskRead  = new PerformanceCounter("PhysicalDisk", "Disk Read Bytes/sec",  "_Total");
+        _diskWrite = new PerformanceCounter("PhysicalDisk", "Disk Write Bytes/sec", "_Total");
+
+        // Network: grab the first non-loopback adapter
+        var netCategory = new PerformanceCounterCategory("Network Interface");
+        var adapter = netCategory.GetInstanceNames()
+            .FirstOrDefault(n => !n.Contains("Loopback", StringComparison.OrdinalIgnoreCase))
+            ?? netCategory.GetInstanceNames().FirstOrDefault() ?? "Ethernet";
+
+        _netSent = new PerformanceCounter("Network Interface", "Bytes Sent/sec",     adapter);
+        _netRecv = new PerformanceCounter("Network Interface", "Bytes Received/sec", adapter);
+
+        // Prime the counters (first read always returns 0)
+        _ = _cpuTotal.NextValue();
+        foreach (var c in _cpuCores) _ = c.NextValue();
+
+        _timer = new System.Threading.Timer(_ => Poll(), null,
+            TimeSpan.FromMilliseconds(500),
+            TimeSpan.FromMilliseconds(PollIntervalMs));
+    }
+
+    // ── Poll ─────────────────────────────────────────────────────────────────
+    private void Poll()
+    {
+        if (_disposed) return;
+        try
+        {
+            var snap = BuildSnapshot();
+            SnapshotReady?.Invoke(snap);
+        }
+        catch { /* swallow; monitor should never crash the app */ }
+    }
+
+    private SystemSnapshot BuildSnapshot()
+    {
+        var snap = new SystemSnapshot
+        {
+            CpuTotalUsage = _cpuTotal.NextValue(),
+            CpuCoreUsages = _cpuCores.Select(c => c.NextValue()).ToArray(),
+            DiskReadMbps  = _diskRead.NextValue()  / 1_048_576f,
+            DiskWriteMbps = _diskWrite.NextValue() / 1_048_576f,
+            NetworkSentMbps     = _netSent.NextValue() / 1_048_576f,
+            NetworkReceivedMbps = _netRecv.NextValue() / 1_048_576f,
+        };
+
+        EnrichFromWmi(snap);
+        EnrichRam(snap);
+        EnrichDisks(snap);
+        snap.HealthScore = CalculateHealthScore(snap);
+        snap.Alerts = GenerateAlerts(snap);
+
+        return snap;
+    }
+
+    // ── WMI enrichment ────────────────────────────────────────────────────────
+    private static void EnrichFromWmi(SystemSnapshot snap)
+    {
+        try
+        {
+            using var searcher = new ManagementObjectSearcher(
+                "SELECT Name, CurrentClockSpeed FROM Win32_Processor");
+            foreach (ManagementObject obj in searcher.Get())
+            {
+                snap.CpuName = obj["Name"]?.ToString()?.Trim() ?? string.Empty;
+                snap.CpuBaseSpeedMhz = Convert.ToInt32(obj["CurrentClockSpeed"]);
+                break;
+            }
+        }
+        catch { }
+
+        // Temperature (OHM/WMI — may require admin)
+        try
+        {
+            using var searcher = new ManagementObjectSearcher(
+                @"root\WMI", "SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature");
+            foreach (ManagementObject obj in searcher.Get())
+            {
+                var raw = Convert.ToDouble(obj["CurrentTemperature"]);
+                snap.CpuTemperature = (float)((raw / 10.0) - 273.15);
+                break;
+            }
+        }
+        catch { }
+    }
+
+    private static void EnrichRam(SystemSnapshot snap)
+    {
+        try
+        {
+            using var searcher = new ManagementObjectSearcher(
+                "SELECT TotalVisibleMemorySize, FreePhysicalMemory FROM Win32_OperatingSystem");
+            foreach (ManagementObject obj in searcher.Get())
+            {
+                var total = Convert.ToInt64(obj["TotalVisibleMemorySize"]) * 1024L;
+                var free  = Convert.ToInt64(obj["FreePhysicalMemory"])     * 1024L;
+                snap.RamTotalBytes = total;
+                snap.RamUsedBytes  = total - free;
+                break;
+            }
+        }
+        catch { }
+    }
+
+    private static void EnrichDisks(SystemSnapshot snap)
+    {
+        foreach (var drive in DriveInfo.GetDrives())
+        {
+            if (!drive.IsReady) continue;
+            snap.Disks.Add(new DiskInfo
+            {
+                DriveLetter = drive.Name,
+                Label       = drive.VolumeLabel,
+                TotalBytes  = drive.TotalSize,
+                FreeBytes   = drive.TotalFreeSpace,
+                DriveFormat = drive.DriveFormat,
+            });
+        }
+    }
+
+    // ── Health score ─────────────────────────────────────────────────────────
+    private static int CalculateHealthScore(SystemSnapshot s)
+    {
+        float score = 100f;
+
+        // CPU usage penalty
+        if (s.CpuTotalUsage > 90) score -= 20;
+        else if (s.CpuTotalUsage > 70) score -= 10;
+
+        // CPU temp penalty
+        if (s.CpuTemperature > 90) score -= 25;
+        else if (s.CpuTemperature > 75) score -= 10;
+
+        // RAM penalty
+        if (s.RamUsagePercent > 90) score -= 20;
+        else if (s.RamUsagePercent > 80) score -= 10;
+
+        // Low disk space penalty (any drive under 10%)
+        foreach (var disk in s.Disks)
+        {
+            if (disk.UsagePercent > 95) score -= 15;
+            else if (disk.UsagePercent > 90) score -= 8;
+        }
+
+        return Math.Max(0, (int)score);
+    }
+
+    private static List<HealthAlert> GenerateAlerts(SystemSnapshot s)
+    {
+        var alerts = new List<HealthAlert>();
+
+        if (s.CpuTotalUsage > 90)
+            alerts.Add(new() { Severity = AlertSeverity.Critical,   Category = "CPU",  Message = $"CPU at {s.CpuTotalUsage:0}% — unusually high" });
+        else if (s.CpuTotalUsage > 70)
+            alerts.Add(new() { Severity = AlertSeverity.Warning,    Category = "CPU",  Message = $"CPU at {s.CpuTotalUsage:0}%" });
+
+        if (s.CpuTemperature > 85)
+            alerts.Add(new() { Severity = AlertSeverity.Critical,   Category = "CPU",  Message = $"CPU temp {s.CpuTemperature:0}°C — consider cooling" });
+
+        if (s.RamUsagePercent > 90)
+            alerts.Add(new() { Severity = AlertSeverity.Critical,   Category = "RAM",  Message = $"RAM at {s.RamUsagePercent:0}% — close some apps" });
+
+        foreach (var disk in s.Disks.Where(d => d.UsagePercent > 90))
+            alerts.Add(new() { Severity = AlertSeverity.Warning,    Category = "Disk", Message = $"{disk.DriveLetter} is {disk.UsagePercent:0}% full" });
+
+        return alerts;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _timer.Dispose();
+        _cpuTotal.Dispose();
+        foreach (var c in _cpuCores) c.Dispose();
+        _diskRead.Dispose(); _diskWrite.Dispose();
+        _netSent.Dispose();  _netRecv.Dispose();
+    }
+}
