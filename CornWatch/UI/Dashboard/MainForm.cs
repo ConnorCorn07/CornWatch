@@ -11,7 +11,6 @@ public partial class MainForm : Form
     private WebView2? _webView;
     private bool _webViewReady = false;
 
-    // JSON serialiser options (camelCase for JS compatibility)
     private static readonly JsonSerializerOptions _jsonOpts = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
@@ -26,39 +25,28 @@ public partial class MainForm : Form
 
     private void InitializeComponent()
     {
-        Text            = "🌽 CornWatch — System Health Dashboard";
-        Size            = new Size(1280, 800);
-        MinimumSize     = new Size(960, 640);
-        StartPosition   = FormStartPosition.CenterScreen;
-        BackColor       = Color.FromArgb(10, 10, 10);
-
-        // Borderless custom chrome (optional, can revert to standard)
-        // FormBorderStyle = FormBorderStyle.None;
-
+        Text          = "🌽 CornWatch — System Health Dashboard";
+        Size          = new Size(1280, 800);
+        MinimumSize   = new Size(960, 640);
+        StartPosition = FormStartPosition.CenterScreen;
+        BackColor     = Color.FromArgb(10, 10, 10);
         _ = InitWebViewAsync();
     }
 
     private async Task InitWebViewAsync()
     {
-        _webView = new WebView2
-        {
-            Dock = DockStyle.Fill,
-        };
+        _webView = new WebView2 { Dock = DockStyle.Fill };
         Controls.Add(_webView);
 
         await _webView.EnsureCoreWebView2Async();
+        _webView.CoreWebView2.AddHostObjectToScript("cornBridge", new CornBridge(_monitor));
 
-        // Allow the C# side to call JS and vice versa
-        _webView.CoreWebView2.AddHostObjectToScript("cornBridge", new CornBridge(this));
-
-        // Disable default context menu in release
 #if !DEBUG
         _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
         _webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
         _webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
 #endif
 
-        // Load the dashboard HTML from the embedded resource or file
         var htmlPath = Path.Combine(AppContext.BaseDirectory, "UI", "Dashboard", "dashboard.html");
         if (File.Exists(htmlPath))
             _webView.CoreWebView2.Navigate("file:///" + htmlPath.Replace('\\', '/'));
@@ -68,23 +56,16 @@ public partial class MainForm : Form
         _webView.CoreWebView2.NavigationCompleted += (_, _) => _webViewReady = true;
     }
 
-    // ── Push snapshot to JS ──────────────────────────────────────────────────
     private void OnSnapshotReady(SystemSnapshot snap)
     {
         if (!_webViewReady || _webView is null) return;
-
         var json = JsonSerializer.Serialize(snap, _jsonOpts);
-
-        // Marshal to UI thread
-        if (InvokeRequired)
-            Invoke(() => PushToJs(json));
-        else
-            PushToJs(json);
+        if (InvokeRequired) Invoke(() => PushToJs(json));
+        else PushToJs(json);
     }
 
     private void PushToJs(string json)
     {
-        // Calls window.cornWatch.onSnapshot(jsonString) in the dashboard
         _ = _webView?.CoreWebView2.ExecuteScriptAsync(
             $"window.cornWatch?.onSnapshot({json})");
     }
@@ -108,14 +89,15 @@ public partial class MainForm : Form
         """;
 }
 
-/// <summary>
-/// Host object exposed to JavaScript as window.chrome.webview.hostObjects.cornBridge
-/// Lets the JS dashboard call back into C#.
-/// </summary>
 [System.Runtime.InteropServices.ComVisible(true)]
-public class CornBridge(MainForm _)
+public class CornBridge(SystemMonitor monitor)
 {
-    public void RequestSnapshot() { /* force an immediate refresh */ }
     public void OpenProcessManager() => System.Diagnostics.Process.Start("taskmgr.exe");
     public void OpenResourceMonitor() => System.Diagnostics.Process.Start("resmon.exe");
+
+    /// <summary>
+    /// Called from JS — returns the raw sensor list for the GPU so we can
+    /// see exactly what LibreHardwareMonitor is reporting on this machine.
+    /// </summary>
+    public string GetGpuSensorDump() => monitor.GpuSensorDump;
 }

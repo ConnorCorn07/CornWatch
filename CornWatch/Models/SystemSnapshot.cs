@@ -9,9 +9,9 @@ public class SystemSnapshot
     public DateTime Timestamp { get; set; } = DateTime.Now;
 
     // ── CPU ──────────────────────────────────────────────────────────────────
-    public float CpuTotalUsage { get; set; }         // 0–100%
-    public float[] CpuCoreUsages { get; set; } = [];  // per-core, 0–100%
-    public float CpuTemperature { get; set; }         // °C (WMI, may be 0 if unavailable)
+    public float CpuTotalUsage { get; set; }
+    public float[] CpuCoreUsages { get; set; } = [];
+    public float CpuTemperature { get; set; }
     public int CpuBaseSpeedMhz { get; set; }
     public string CpuName { get; set; } = string.Empty;
 
@@ -32,20 +32,34 @@ public class SystemSnapshot
     public float NetworkReceivedMbps { get; set; }
     public string ActiveAdapterName { get; set; } = string.Empty;
 
-    // ── GPU (future) ─────────────────────────────────────────────────────────
-    public float GpuUsage { get; set; }
-    public float GpuTemperature { get; set; }
-    public string GpuName { get; set; } = string.Empty;
+    // ── GPU ──────────────────────────────────────────────────────────────────
+    public List<GpuInfo> Gpus { get; set; } = [];
+
+    // Convenience accessors for the primary GPU (first detected)
+    public GpuInfo? PrimaryGpu => Gpus.Count > 0 ? Gpus[0] : null;
 
     // ── Health Score ─────────────────────────────────────────────────────────
-    /// <summary>
-    /// Composite score 0–100. 100 = perfect health.
-    /// Deductions: high CPU temp, high RAM usage, low disk space.
-    /// </summary>
     public int HealthScore { get; set; }
 
     // ── Alerts ───────────────────────────────────────────────────────────────
     public List<HealthAlert> Alerts { get; set; } = [];
+}
+
+public class GpuInfo
+{
+    public string Name { get; set; } = string.Empty;
+    public float UsagePercent { get; set; }       // 0–100%
+    public float TemperatureCelsius { get; set; } // °C
+    public float VramUsedMb { get; set; }         // MB
+    public float VramTotalMb { get; set; }        // MB
+    public float VramUsagePercent { get; set; }   // 0–100%
+    public float FanRpm { get; set; }             // RPM
+    public float CoreClockMhz { get; set; }       // MHz
+    public float PowerWatts { get; set; }         // Watts
+
+    // AMD-specific: D3D engine workloads (D3D 3D, Compute, Copy, etc.)
+    public float ComputeUsagePercent { get; set; }
+    public Dictionary<string, float> D3DEngines { get; set; } = [];
 }
 
 public class DiskInfo
@@ -64,7 +78,7 @@ public class HealthAlert
 {
     public AlertSeverity Severity { get; set; }
     public string Message { get; set; } = string.Empty;
-    public string Category { get; set; } = string.Empty; // "CPU", "RAM", "Disk", "Network"
+    public string Category { get; set; } = string.Empty;
 }
 
 public enum AlertSeverity { Info, Warning, Critical }

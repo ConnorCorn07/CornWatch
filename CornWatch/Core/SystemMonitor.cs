@@ -13,8 +13,7 @@ public sealed class SystemMonitor : IDisposable
     // ── Events ────────────────────────────────────────────────────────────────
     public event Action<SystemSnapshot>? SnapshotReady;
 
-    // ── Config ────────────────────────────────────────────────────────────────
-    public int PollIntervalMs { get; set; } = 1000; // 1-second default
+    public int PollIntervalMs { get; set; } = 1000;
 
     // ── Internal state ────────────────────────────────────────────────────────
     private readonly System.Threading.Timer _timer;
@@ -24,13 +23,14 @@ public sealed class SystemMonitor : IDisposable
     private readonly PerformanceCounter _diskWrite;
     private readonly PerformanceCounter _netSent;
     private readonly PerformanceCounter _netRecv;
+    private readonly GpuMonitor _gpuMonitor;
+    public string GpuSensorDump => _gpuMonitor.DebugSensorDump;
     private bool _disposed;
 
     public SystemMonitor()
     {
         _cpuTotal = new PerformanceCounter("Processor", "% Processor Time", "_Total");
 
-        // Per-core counters
         var category = new PerformanceCounterCategory("Processor");
         foreach (var instance in category.GetInstanceNames()
             .Where(n => n != "_Total")
@@ -42,7 +42,6 @@ public sealed class SystemMonitor : IDisposable
         _diskRead  = new PerformanceCounter("PhysicalDisk", "Disk Read Bytes/sec",  "_Total");
         _diskWrite = new PerformanceCounter("PhysicalDisk", "Disk Write Bytes/sec", "_Total");
 
-        // Network: grab the first non-loopback adapter
         var netCategory = new PerformanceCounterCategory("Network Interface");
         var adapter = netCategory.GetInstanceNames()
             .FirstOrDefault(n => !n.Contains("Loopback", StringComparison.OrdinalIgnoreCase))
@@ -51,35 +50,32 @@ public sealed class SystemMonitor : IDisposable
         _netSent = new PerformanceCounter("Network Interface", "Bytes Sent/sec",     adapter);
         _netRecv = new PerformanceCounter("Network Interface", "Bytes Received/sec", adapter);
 
-        // Prime the counters (first read always returns 0)
+        // Prime counters
         _ = _cpuTotal.NextValue();
         foreach (var c in _cpuCores) _ = c.NextValue();
+
+        _gpuMonitor = new GpuMonitor();
 
         _timer = new System.Threading.Timer(_ => Poll(), null,
             TimeSpan.FromMilliseconds(500),
             TimeSpan.FromMilliseconds(PollIntervalMs));
     }
 
-    // ── Poll ─────────────────────────────────────────────────────────────────
     private void Poll()
     {
         if (_disposed) return;
-        try
-        {
-            var snap = BuildSnapshot();
-            SnapshotReady?.Invoke(snap);
-        }
-        catch { /* swallow; monitor should never crash the app */ }
+        try { SnapshotReady?.Invoke(BuildSnapshot()); }
+        catch { }
     }
 
     private SystemSnapshot BuildSnapshot()
     {
         var snap = new SystemSnapshot
         {
-            CpuTotalUsage = _cpuTotal.NextValue(),
-            CpuCoreUsages = _cpuCores.Select(c => c.NextValue()).ToArray(),
-            DiskReadMbps  = _diskRead.NextValue()  / 1_048_576f,
-            DiskWriteMbps = _diskWrite.NextValue() / 1_048_576f,
+            CpuTotalUsage       = _cpuTotal.NextValue(),
+            CpuCoreUsages       = _cpuCores.Select(c => c.NextValue()).ToArray(),
+            DiskReadMbps        = _diskRead.NextValue()  / 1_048_576f,
+            DiskWriteMbps       = _diskWrite.NextValue() / 1_048_576f,
             NetworkSentMbps     = _netSent.NextValue() / 1_048_576f,
             NetworkReceivedMbps = _netRecv.NextValue() / 1_048_576f,
         };
@@ -87,13 +83,22 @@ public sealed class SystemMonitor : IDisposable
         EnrichFromWmi(snap);
         EnrichRam(snap);
         EnrichDisks(snap);
+        EnrichGpu(snap);
+
         snap.HealthScore = CalculateHealthScore(snap);
-        snap.Alerts = GenerateAlerts(snap);
+        snap.Alerts      = GenerateAlerts(snap);
 
         return snap;
     }
 
-    // ── WMI enrichment ────────────────────────────────────────────────────────
+    // ── GPU ───────────────────────────────────────────────────────────────────
+    private void EnrichGpu(SystemSnapshot snap)
+    {
+        try { snap.Gpus = _gpuMonitor.Read(); }
+        catch { }
+    }
+
+    // ── WMI ───────────────────────────────────────────────────────────────────
     private static void EnrichFromWmi(SystemSnapshot snap)
     {
         try
@@ -102,22 +107,20 @@ public sealed class SystemMonitor : IDisposable
                 "SELECT Name, CurrentClockSpeed FROM Win32_Processor");
             foreach (ManagementObject obj in searcher.Get())
             {
-                snap.CpuName = obj["Name"]?.ToString()?.Trim() ?? string.Empty;
+                snap.CpuName        = obj["Name"]?.ToString()?.Trim() ?? string.Empty;
                 snap.CpuBaseSpeedMhz = Convert.ToInt32(obj["CurrentClockSpeed"]);
                 break;
             }
         }
         catch { }
 
-        // Temperature (OHM/WMI — may require admin)
         try
         {
             using var searcher = new ManagementObjectSearcher(
                 @"root\WMI", "SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature");
             foreach (ManagementObject obj in searcher.Get())
             {
-                var raw = Convert.ToDouble(obj["CurrentTemperature"]);
-                snap.CpuTemperature = (float)((raw / 10.0) - 273.15);
+                snap.CpuTemperature = (float)(Convert.ToDouble(obj["CurrentTemperature"]) / 10.0 - 273.15);
                 break;
             }
         }
@@ -163,23 +166,29 @@ public sealed class SystemMonitor : IDisposable
     {
         float score = 100f;
 
-        // CPU usage penalty
         if (s.CpuTotalUsage > 90) score -= 20;
         else if (s.CpuTotalUsage > 70) score -= 10;
 
-        // CPU temp penalty
         if (s.CpuTemperature > 90) score -= 25;
         else if (s.CpuTemperature > 75) score -= 10;
 
-        // RAM penalty
         if (s.RamUsagePercent > 90) score -= 20;
         else if (s.RamUsagePercent > 80) score -= 10;
 
-        // Low disk space penalty (any drive under 10%)
         foreach (var disk in s.Disks)
         {
             if (disk.UsagePercent > 95) score -= 15;
             else if (disk.UsagePercent > 90) score -= 8;
+        }
+
+        // GPU penalties
+        if (s.PrimaryGpu is { } gpu)
+        {
+            if (gpu.TemperatureCelsius > 95) score -= 25;
+            else if (gpu.TemperatureCelsius > 80) score -= 10;
+
+            if (gpu.VramUsagePercent > 95) score -= 15;
+            else if (gpu.VramUsagePercent > 85) score -= 7;
         }
 
         return Math.Max(0, (int)score);
@@ -190,18 +199,30 @@ public sealed class SystemMonitor : IDisposable
         var alerts = new List<HealthAlert>();
 
         if (s.CpuTotalUsage > 90)
-            alerts.Add(new() { Severity = AlertSeverity.Critical,   Category = "CPU",  Message = $"CPU at {s.CpuTotalUsage:0}% — unusually high" });
+            alerts.Add(new() { Severity = AlertSeverity.Critical, Category = "CPU",  Message = $"CPU at {s.CpuTotalUsage:0}% — unusually high" });
         else if (s.CpuTotalUsage > 70)
-            alerts.Add(new() { Severity = AlertSeverity.Warning,    Category = "CPU",  Message = $"CPU at {s.CpuTotalUsage:0}%" });
+            alerts.Add(new() { Severity = AlertSeverity.Warning,  Category = "CPU",  Message = $"CPU at {s.CpuTotalUsage:0}%" });
 
         if (s.CpuTemperature > 85)
-            alerts.Add(new() { Severity = AlertSeverity.Critical,   Category = "CPU",  Message = $"CPU temp {s.CpuTemperature:0}°C — consider cooling" });
+            alerts.Add(new() { Severity = AlertSeverity.Critical, Category = "CPU",  Message = $"CPU temp {s.CpuTemperature:0}°C — consider cooling" });
 
         if (s.RamUsagePercent > 90)
-            alerts.Add(new() { Severity = AlertSeverity.Critical,   Category = "RAM",  Message = $"RAM at {s.RamUsagePercent:0}% — close some apps" });
+            alerts.Add(new() { Severity = AlertSeverity.Critical, Category = "RAM",  Message = $"RAM at {s.RamUsagePercent:0}% — close some apps" });
 
         foreach (var disk in s.Disks.Where(d => d.UsagePercent > 90))
-            alerts.Add(new() { Severity = AlertSeverity.Warning,    Category = "Disk", Message = $"{disk.DriveLetter} is {disk.UsagePercent:0}% full" });
+            alerts.Add(new() { Severity = AlertSeverity.Warning,  Category = "Disk", Message = $"{disk.DriveLetter} is {disk.UsagePercent:0}% full" });
+
+        // GPU alerts
+        if (s.PrimaryGpu is { } gpu)
+        {
+            if (gpu.TemperatureCelsius > 95)
+                alerts.Add(new() { Severity = AlertSeverity.Critical, Category = "GPU", Message = $"GPU temp {gpu.TemperatureCelsius:0}°C — critical!" });
+            else if (gpu.TemperatureCelsius > 80)
+                alerts.Add(new() { Severity = AlertSeverity.Warning,  Category = "GPU", Message = $"GPU temp {gpu.TemperatureCelsius:0}°C — running warm" });
+
+            if (gpu.VramUsagePercent > 95)
+                alerts.Add(new() { Severity = AlertSeverity.Critical, Category = "GPU", Message = $"VRAM nearly full ({gpu.VramUsedMb:0}/{gpu.VramTotalMb:0} MB)" });
+        }
 
         return alerts;
     }
@@ -215,5 +236,6 @@ public sealed class SystemMonitor : IDisposable
         foreach (var c in _cpuCores) c.Dispose();
         _diskRead.Dispose(); _diskWrite.Dispose();
         _netSent.Dispose();  _netRecv.Dispose();
+        _gpuMonitor.Dispose();
     }
 }
