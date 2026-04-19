@@ -24,6 +24,7 @@ public sealed class SystemMonitor : IDisposable
     private readonly PerformanceCounter _netSent;
     private readonly PerformanceCounter _netRecv;
     private readonly GpuMonitor _gpuMonitor;
+    private readonly ProcessWatchdog _procWatchdog;
     public string GpuSensorDump => _gpuMonitor.DebugSensorDump;
     private bool _disposed;
 
@@ -54,7 +55,8 @@ public sealed class SystemMonitor : IDisposable
         _ = _cpuTotal.NextValue();
         foreach (var c in _cpuCores) _ = c.NextValue();
 
-        _gpuMonitor = new GpuMonitor();
+        _gpuMonitor   = new GpuMonitor();
+        _procWatchdog = new ProcessWatchdog(topN: 8);
 
         _timer = new System.Threading.Timer(_ => Poll(), null,
             TimeSpan.FromMilliseconds(500),
@@ -84,11 +86,19 @@ public sealed class SystemMonitor : IDisposable
         EnrichRam(snap);
         EnrichDisks(snap);
         EnrichGpu(snap);
+        EnrichProcesses(snap);
 
         snap.HealthScore = CalculateHealthScore(snap);
         snap.Alerts      = GenerateAlerts(snap);
 
         return snap;
+    }
+
+    // ── Processes ────────────────────────────────────────────────────────────
+    private void EnrichProcesses(SystemSnapshot snap)
+    {
+        try { snap.Processes = _procWatchdog.Read(); }
+        catch { }
     }
 
     // ── GPU ───────────────────────────────────────────────────────────────────
@@ -237,5 +247,6 @@ public sealed class SystemMonitor : IDisposable
         _diskRead.Dispose(); _diskWrite.Dispose();
         _netSent.Dispose();  _netRecv.Dispose();
         _gpuMonitor.Dispose();
+        _procWatchdog.Dispose();
     }
 }

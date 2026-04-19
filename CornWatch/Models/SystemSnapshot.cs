@@ -1,3 +1,5 @@
+using CornWatch.Core;
+
 namespace CornWatch.Models;
 
 /// <summary>
@@ -40,6 +42,9 @@ public class SystemSnapshot
 
     // ── Health Score ─────────────────────────────────────────────────────────
     public int HealthScore { get; set; }
+
+    // ── Processes ────────────────────────────────────────────────────────────
+    public List<ProcessEntry> Processes { get; set; } = [];
 
     // ── Alerts ───────────────────────────────────────────────────────────────
     public List<HealthAlert> Alerts { get; set; } = [];

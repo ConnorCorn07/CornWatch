@@ -4,6 +4,7 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>Assets\cornwatch.ico</ApplicationIcon>
     <AssemblyName>CornWatch</AssemblyName>
     <RootNamespace>CornWatch</RootNamespace>
     <Nullable>enable</Nullable>
@@ -11,6 +12,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Content Include="Assets\cornwatch.ico">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Assets\cornwatch.png">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
     <Content Include="UI\Dashboard\dashboard.html">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>

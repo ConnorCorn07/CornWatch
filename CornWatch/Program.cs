@@ -5,9 +5,10 @@ namespace CornWatch;
 static class Program
 {
     [STAThread]
-    static void Main()
+    static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
-        Application.Run(new MainForm());
+        var startMinimized = args.Contains("--minimized", StringComparer.OrdinalIgnoreCase);
+        Application.Run(new MainForm(startMinimized));
     }
 }
